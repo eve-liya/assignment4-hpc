@@ -4,6 +4,27 @@ from torch.autograd import Function
 import triton
 import triton.language as tl
 
+def compute_rmsnorm_backward_g(grad_out, x, g):
+    xrms = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5)
+    dims = tuple(range(0, len(x.shape) - 1))
+    return (xrms * grad_out).sum(dims)
+
+
+def compute_rmsnorm_backward_x(grad_out, x, g):
+    x_shape = x.shape
+    d = x.shape[-1]
+    x = x.view(-1, d)
+    grad_out = grad_out.view(-1, d)
+
+    gj = g[None, :]
+    ms = x.pow(2).mean(-1, keepdim=True) + 1e-5
+
+    gxgrad = (x * gj * grad_out).sum(-1, keepdim=True)
+
+    out = (gj * grad_out - x * gxgrad / (d * ms)) * torch.rsqrt(ms)
+    return out.view(*x_shape)
+
+
 # ---------------- PyTorch RMSNorm Autograd Function ----------------
 class RMSNormFunctionPT(Function):
     @staticmethod
