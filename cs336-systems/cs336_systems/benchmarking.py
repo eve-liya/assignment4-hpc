@@ -8,8 +8,7 @@ from torch.cuda.amp import autocast
 
 import torch
 from torch.profiler import profile, record_function, ProfilerActivity
-
-from cs336_basics.model import Transformer as TransformerModel
+import cs336_basics.model as model
 
 MODEL_SPECS = {
     "small":  (768,  3072, 12, 12),
@@ -22,9 +21,9 @@ MODEL_SPECS = {
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model-size", choices=MODEL_SPECS.keys(), required=True)
-    p.add_argument("--vocab-size", type=int, default=10000)
-    p.add_argument("--seq-len",    type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--vocab-size", type=int, default=1000)
+    p.add_argument("--seq-len",    type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--warmup",     type=int, default=1,
                    help="Number of warm-up iterations")
     p.add_argument("--steps",      type=int, default=5,
@@ -34,7 +33,7 @@ def parse_args():
                    help="What to run")
     p.add_argument("--device",     choices=["cpu","cuda"], default="cuda")
     p.add_argument("--profile",    action="store_true",
-                   help="Run PyTorch profiler (only for XL model)")
+                   help="Run PyTorch profiler")
     p.add_argument("--mixed", action="store_true",
                help="Enable torch.autocast mixed precision")
 
@@ -42,10 +41,10 @@ def parse_args():
 
 def make_model(args):
     d_model, d_ff, n_layers, n_heads = MODEL_SPECS[args.model_size]
-    m = TransformerModel(
+    m = model.BasicsTransformerLM(
         d_model=d_model, d_ff=d_ff,
-        n_layers=n_layers, n_heads=n_heads,
-        vocab_size=args.vocab_size, seq_len=args.seq_len
+        num_layers=n_layers, num_heads=n_heads,
+        vocab_size=args.vocab_size, context_length=args.seq_len
     )
     return m.to(args.device)
 
@@ -56,15 +55,18 @@ def make_batch(args):
         device=args.device, dtype=torch.long
     )
 
-def run_step(model, batch, optimizer, mode, use_mixed):
-    ctx = autocast() if use_mixed and model.device.type=="cuda" else contextlib.nullcontext()
-    with ctx:
+def run_step(model, batch, optimizer, mode, use_mixed, device):
+    ctx = autocast() if use_mixed and device=="cuda" else contextlib.nullcontext()
+    with ctx, record_function("forward_pass"):
         out = model(batch)
-        if mode in ("backward","both"):
+    if mode in ("backward","both"):
+        with record_function("backward_pass"):
             loss = out.sum()
             loss.backward()
     if optimizer is not None:
-        optimizer.step(); optimizer.zero_grad(set_to_none=True)
+        with record_function("optimizer"):
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
 
 def main():
@@ -77,26 +79,28 @@ def main():
 
     # warm-up
     for _ in range(args.warmup):
-        run_step(model, batch, optimizer, args.mode)
+        run_step(model, batch, optimizer, args.mode, args.mixed, args.device)
         if args.device=="cuda":
             torch.cuda.synchronize()
 
     if args.profile:
-        assert args.model_size=="xl", "--profile only supported for XL"
+        from torch._C._profiler import _ExperimentalConfig
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            experimental_config=_ExperimentalConfig(verbose=True),
             record_shapes=True,
             with_stack=True,
             profile_memory=False
         ) as prof:
+
             for _ in range(args.steps):
-                run_step(model, batch, optimizer, args.mode)
+                run_step(model, batch, optimizer, args.mode, args.mixed, args.device)
                 prof.step()
                 if args.device=="cuda":
                     torch.cuda.synchronize()
 
         # output stacks for flame graph
-        prof.export_stacks("xl_profiler_stacks.txt", "self_cuda_time_total")
+        prof.export_stacks("l_profiler_stacks.txt", "self_cuda_time_total")
         # print top 50 operators by CPU time
         print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
     else:
@@ -104,7 +108,7 @@ def main():
         times = []
         for _ in range(args.steps):
             start = time.perf_counter()
-            run_step(model, batch, optimizer, args.mode)
+            run_step(model, batch, optimizer, args.mode, args.mixed, args.device)
             if args.device=="cuda":
                 torch.cuda.synchronize()
             end = time.perf_counter()

@@ -9,8 +9,8 @@ from torch import nn
 from torch.cuda.amp import autocast
 
 # Import your autograd Functions
-from adapters import rmsnorm_autograd_function_pytorch as rmsnorm_pt
-from adapters import get_rmsnorm_autograd_function_triton as rmsnorm_triton
+from rmsnorm import RMSNormFunctionPT as rmsnorm_pt
+from rmsnorm import RMSNormFunctionTriton as rmsnorm_triton
 
 # Wrapper Modules
 class RMSNormPT(nn.Module):
