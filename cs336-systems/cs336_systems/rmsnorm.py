@@ -79,7 +79,7 @@ def _rmsnorm_fwd_kernel(
     w = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
     # Compute inv
     sum_sq = tl.sum(x_row * x_row, axis=0)
-    inv = tl.rsqrt(sum_sq / H + eps)
+    inv = tl.math.rsqrt(sum_sq / H + eps)
     # Compute output
     out_row = x_row * inv * w
     tl.store(out_ptr + row * stride_n + offsets * stride_h, out_row, mask=mask)
@@ -103,7 +103,7 @@ def _rmsnorm_backward_kernel(
     grad_out = tl.load(grad_out_ptr + base + offsets * stride_h, mask=mask, other=0.0)
     # Compute inv and inv^3
     sum_sq = tl.sum(x_row * x_row, axis=0)
-    inv = tl.rsqrt(sum_sq / H + eps)
+    inv = tl.math.rsqrt(sum_sq / H + eps)
     inv3 = inv * inv * inv
     # grad_x = grad_out * w * inv - x * w * inv^3 * (sum(grad_out * x * w)/H)
     term1 = grad_out * w * inv
