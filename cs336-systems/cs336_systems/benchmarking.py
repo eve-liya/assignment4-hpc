@@ -2,6 +2,9 @@
 import argparse
 import time
 import statistics
+import contextlib
+from torch.cuda.amp import autocast
+
 
 import torch
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -32,6 +35,9 @@ def parse_args():
     p.add_argument("--device",     choices=["cpu","cuda"], default="cuda")
     p.add_argument("--profile",    action="store_true",
                    help="Run PyTorch profiler (only for XL model)")
+    p.add_argument("--mixed", action="store_true",
+               help="Enable torch.autocast mixed precision")
+
     return p.parse_args()
 
 def make_model(args):
@@ -50,17 +56,16 @@ def make_batch(args):
         device=args.device, dtype=torch.long
     )
 
-def run_step(model, batch, optimizer, mode):
-    with record_function("forward_pass"):
+def run_step(model, batch, optimizer, mode, use_mixed):
+    ctx = autocast() if use_mixed and model.device.type=="cuda" else contextlib.nullcontext()
+    with ctx:
         out = model(batch)
-    if mode in ("backward","both"):
-        with record_function("backward_pass"):
+        if mode in ("backward","both"):
             loss = out.sum()
             loss.backward()
     if optimizer is not None:
-        with record_function("optimizer"):
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+        optimizer.step(); optimizer.zero_grad(set_to_none=True)
+
 
 def main():
     args = parse_args()
