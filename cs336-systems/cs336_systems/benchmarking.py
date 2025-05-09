@@ -4,11 +4,11 @@ import time
 import statistics
 
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from cs336_basics.model import Transformer as TransformerModel
 
 MODEL_SPECS = {
-    # d_model, d_ff, n_layers, n_heads
     "small":  (768,  3072, 12, 12),
     "medium": (1024, 4096, 24, 16),
     "large":  (1280, 5120, 36, 20),
@@ -28,73 +28,87 @@ def parse_args():
                    help="Number of timed iterations")
     p.add_argument("--mode",       choices=["forward","backward","both"],
                    default="both",
-                   help="What to time")
+                   help="What to run")
     p.add_argument("--device",     choices=["cpu","cuda"], default="cuda")
+    p.add_argument("--profile",    action="store_true",
+                   help="Run PyTorch profiler (only for XL model)")
     return p.parse_args()
 
 def make_model(args):
     d_model, d_ff, n_layers, n_heads = MODEL_SPECS[args.model_size]
-    model = TransformerModel(
-        d_model=d_model,
-        d_ff=d_ff,
-        n_layers=n_layers,
-        n_heads=n_heads,
-        vocab_size=args.vocab_size,
-        seq_len=args.seq_len,
+    m = TransformerModel(
+        d_model=d_model, d_ff=d_ff,
+        n_layers=n_layers, n_heads=n_heads,
+        vocab_size=args.vocab_size, seq_len=args.seq_len
     )
-    return model.to(args.device)
+    return m.to(args.device)
 
 def make_batch(args):
-    # assumes your model takes token IDs as input
     return torch.randint(
-        low=0, high=args.vocab_size,
-        size=(args.batch_size, args.seq_len),
-        device=args.device,
-        dtype=torch.long,
+        0, args.vocab_size,
+        (args.batch_size, args.seq_len),
+        device=args.device, dtype=torch.long
     )
 
-def run_step(model, batch, mode):
-    out = model(batch)
+def run_step(model, batch, optimizer, mode):
+    with record_function("forward_pass"):
+        out = model(batch)
     if mode in ("backward","both"):
-        loss = out.sum()
-        loss.backward()
-    return out
+        with record_function("backward_pass"):
+            loss = out.sum()
+            loss.backward()
+    if optimizer is not None:
+        with record_function("optimizer"):
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
 def main():
     args = parse_args()
     torch.manual_seed(0)
+
     model = make_model(args)
     batch = make_batch(args)
-
-    # zero gradients
-    def zero_grad():
-        for p in model.parameters():
-            if p.grad is not None:
-                p.grad = None
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3) if args.mode in ("backward","both") else None
 
     # warm-up
     for _ in range(args.warmup):
-        zero_grad()
-        out = run_step(model, batch, args.mode)
+        run_step(model, batch, optimizer, args.mode)
         if args.device=="cuda":
             torch.cuda.synchronize()
 
-    # timed runs
-    times = []
-    for _ in range(args.steps):
-        zero_grad()
-        start = time.perf_counter()
-        out = run_step(model, batch, args.mode)
-        if args.device=="cuda":
-            torch.cuda.synchronize()
-        end = time.perf_counter()
-        times.append(end - start)
+    if args.profile:
+        assert args.model_size=="xl", "--profile only supported for XL"
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_stack=True,
+            profile_memory=False
+        ) as prof:
+            for _ in range(args.steps):
+                run_step(model, batch, optimizer, args.mode)
+                prof.step()
+                if args.device=="cuda":
+                    torch.cuda.synchronize()
 
-    mean_t = statistics.mean(times)
-    std_t  = statistics.stdev(times) if len(times)>1 else 0.0
+        # output stacks for flame graph
+        prof.export_stacks("xl_profiler_stacks.txt", "self_cuda_time_total")
+        # print top 50 operators by CPU time
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
+    else:
+        # normal timing
+        times = []
+        for _ in range(args.steps):
+            start = time.perf_counter()
+            run_step(model, batch, optimizer, args.mode)
+            if args.device=="cuda":
+                torch.cuda.synchronize()
+            end = time.perf_counter()
+            times.append(end - start)
 
-    print(f"{args.model_size:>6} | mode={args.mode:<7} "
-          f"| mean {mean_t:.4f}s ± {std_t:.4f}s over {args.steps} runs")
+        mean_t = statistics.mean(times)
+        std_t  = statistics.stdev(times) if len(times)>1 else 0.0
+        print(f"{args.model_size:>6} | mode={args.mode:<7}"
+              f" | mean {mean_t:.4f}s ± {std_t:.4f}s over {args.steps} runs")
 
 if __name__=="__main__":
     main()
