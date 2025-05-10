@@ -92,6 +92,7 @@ class BasicsTransformerLM(nn.Module):
         num_layers: int,
         num_heads: int,
         d_ff: int,
+        norm: nn.Module,
         attn_pdrop: Optional[float] = None,
         residual_pdrop: Optional[float] = None,
     ):
@@ -114,11 +115,12 @@ class BasicsTransformerLM(nn.Module):
                     d_ff=d_ff,
                     attn_pdrop=attn_pdrop,
                     residual_pdrop=residual_pdrop,
+                    norm=norm,
                 )
                 for _ in range(num_layers)
             ]
         )
-        self.ln_final = RMSNorm(d_model)
+        self.ln_final = norm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         # Tie the weights, since the paper mentions that "we share the same weight
         # matrix between the two embedding layers and the pre-softmax linear transformation"
@@ -287,6 +289,7 @@ class TransformerBlock(nn.Module):
         d_ff: int,
         attn_pdrop: Optional[float] = None,
         residual_pdrop: Optional[float] = None,
+        norm: nn.Module = RMSNorm,
     ):
         super().__init__()
         self.attn = CausalMultiHeadSelfAttention(
@@ -294,9 +297,9 @@ class TransformerBlock(nn.Module):
             num_heads=num_heads,
             attn_pdrop=attn_pdrop,
         )
-        self.ln1 = RMSNorm(d_model)
+        self.ln1 = norm(d_model)
         self.ffn = FFN(d_model=d_model, d_ff=d_ff)
-        self.ln2 = RMSNorm(d_model)
+        self.ln2 = norm(d_model)
         self.residual_pdrop = residual_pdrop
 
     def forward(self, x: torch.Tensor):
